@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Addis Ababa PM2.5 Monitoring</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <style>
+        #map { height: 600px; }
+        .legend { 
+            padding: 10px; 
+            background: white;
+            border-radius: 5px;
+            box-shadow: 0 0 15px rgba(0,0,0,0.2);
+        }
+        .legend i {
+            width: 18px;
+            height: 18px;
+            float: left;
+            margin-right: 8px;
+            opacity: 0.7;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <script>
+        // Initialize map centered on Addis Ababa
+        const map = L.map('map').setView([9.0054, 38.7636], 12);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap'
+        }).addTo(map);
+
+        // API endpoints
+        const stations = [
+            {
+                name: "International Community School",
+                url: "https://api.waqi.info/feed/@9074/?token=73c8730d11180a530537bc757c8259b5af2735ae"
+            },
+            {
+                name: "US Embassy",
+                url: "https://api.waqi.info/feed/@9059/?token=73c8730d11180a530537bc757c8259b5af2735ae"
+            }
+        ];
+
+        // Color scale based on PM2.5 values
+        function getColor(pm25) {
+            return pm25 > 150 ? '#800026' :
+                   pm25 > 100 ? '#BD0026' :
+                   pm25 > 75  ? '#E31A1C' :
+                   pm25 > 50  ? '#FC4E2A' :
+                   pm25 > 25  ? '#FD8D3C' :
+                                 '#FEB24C';
+        }
+
+        // Size scale based on PM2.5 values
+        function getSize(pm25) {
+            return Math.sqrt(pm25) * 4; // Adjust multiplier for visual balance
+        }
+
+        // Fetch and plot data
+        async function loadData() {
+            try {
+                for (const station of stations) {
+                    const response = await fetch(station.url);
+                    const data = await response.json();
+                    
+                    // Extract PM2.5 value
+                    const pm25 = data.data.iaqi.pm25?.v || 0;
+                    const coords = data.data.city.geo;
+                    
+                    // Create circle marker
+                    L.circleMarker([coords[0], coords[1]], {
+                        color: '#333',
+                        weight: 1,
+                        fillColor: getColor(pm25),
+                        fillOpacity: 0.7,
+                        radius: getSize(pm25)
+                    }).bindPopup(`
+                        <b>${station.name}</b><br>
+                        PM2.5: ${pm25} µg/m³<br>
+                        Last update: ${data.data.time.s}
+                    `).addTo(map);
+                }
+                
+                // Add legend
+                const legend = L.control({position: 'bottomright'});
+                legend.onAdd = () => {
+                    const div = L.DomUtil.create('div', 'legend');
+                    const grades = [0, 25, 50, 75, 100, 150];
+                    const labels = [];
+                    
+                    div.innerHTML += '<h4>PM2.5 (µg/m³)</h4>';
+                    for (let i = 0; i < grades.length; i++) {
+                        div.innerHTML += `
+                            <i style="background:${getColor(grades[i] + 1)}"></i>
+                            ${grades[i]}${grades[i + 1] ? `–${grades[i + 1]}` : '+'}<br>
+                        `;
+                    }
+                    return div;
+                };
+                legend.addTo(map);
+
+            } catch (error) {
+                console.error('Error loading data:', error);
+            }
+        }
+
+        // Load data when page loads
+        loadData();
+    </script>
+</body>
+</html>

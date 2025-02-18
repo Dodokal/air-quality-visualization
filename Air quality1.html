@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Air Quality Dashboard</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+    <style>
+        #map { 
+            height: 100vh;
+            width: 100%;
+        }
+        .control-panel {
+            position: absolute;
+            right: 10px;
+            top: 10px;
+            z-index: 1000;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        }
+        .legend {
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 5px;
+            line-height: 1.5;
+        }
+        .legend i {
+            width: 20px;
+            height: 20px;
+            float: left;
+            margin-right: 8px;
+            opacity: 0.7;
+        }
+    </style>
+</head>
+<body>
+    <div class="control-panel">
+        <label for="pollutantSelect">Select Pollutant:</label>
+        <select id="pollutantSelect" class="form-control">
+            <option value="pm25">PM2.5</option>
+            <option value="pm10">PM10</option>
+            <option value="no2">NO₂</option>
+            <option value="o3">O₃</option>
+            <option value="so2">SO₂</option>
+        </select>
+    </div>
+    <div id="map"></div>
+
+    <script>
+        // Initialize map centered on Addis Ababa
+        const map = L.map('map').setView([9.0054, 38.7636], 12);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        // API endpoints
+        const stations = [
+            { id: 'H9074', url: 'https://api.waqi.info/feed/@9074/?token=73c8730d11180a530537bc757c8259b5af2735ae' },
+            { id: 'H9059', url: 'https://api.waqi.info/feed/@9059/?token=73c8730d11180a530537bc757c8259b5af2735ae' },
+            { id: 'A210484', url: 'https://api.waqi.info/feed/A210484/?token=73c8730d11180a530537bc757c8259b5af2735ae' }
+        ];
+
+        let currentOverlay = null;
+        let sensorPoints = [];
+
+        // Enhanced color scales with proper breakpoints
+        const colorScales = {
+            pm25: { colors: ['#00E400', '#FFFF00', '#FF7E00', '#FF0000', '#8F3F97', '#7E0023'], breaks: [0, 12, 35.4, 55.4, 150.4, 250.4] },
+            pm10: { colors: ['#00FF00', '#FFFF00', '#FFA500', '#FF0000', '#800080', '#4B0082'], breaks: [0, 54, 154, 254, 354, 424] },
+            no2: { colors: ['#87CEEB', '#4682B4', '#0000FF', '#00008B', '#4B0082', '#2F4F4F'], breaks: [0, 53, 100, 360, 649, 1249] },
+            o3: { colors: ['#AFEEEE', '#7FFFD4', '#00FF00', '#FFD700', '#FFA500', '#FF0000'], breaks: [0, 54, 70, 85, 105, 200] },
+            so2: { colors: ['#98FB98', '#ADFF2F', '#FFD700', '#FFA500', '#FF4500', '#FF0000'], breaks: [0, 35, 75, 185, 304, 604] }
+        };
+
+        // Fetch all station data with error handling
+        async function fetchAllData() {
+            sensorPoints = [];
+            for (const station of stations) {
+                try {
+                    const response = await fetch(station.url);
+                    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                    const data = await response.json();
+                    
+                    if (data.status !== 'ok') {
+                        console.warn(`Station ${station.id} returned non-ok status:`, data);
+                        continue;
+                    }
+
+                    const coords = data.data.city.geo;
+                    const point = turf.point(
+                        [parseFloat(coords[1]), parseFloat(coords[0])],  // [lng, lat]
+                        {
+                            ...data.data.iaqi,
+                            station: {
+                                id: station.id,
+                                name: data.data.city.name
+                            }
+                        }
+                    );
+                    sensorPoints.push(point);
+                } catch (error) {
+                    console.error(`Error fetching ${station.id}:`, error);
+                }
+            }
+            if (sensorPoints.length > 0) {
+                updateVisualization();
+            } else {
+                console.error('No sensor data available');
+            }
+        }
+
+        // Improved interpolation with error boundaries
+        function createInterpolation(pollutant) {
+            try {
+                const values = sensorPoints.map(pt => pt.properties[pollutant]?.v || 0);
+                const points = turf.featureCollection(sensorPoints);
+                
+                // Create convex hull boundary
+                const boundary = turf.convex(points);
+                if (!boundary) throw new Error('Could not create convex hull');
+
+                // Generate grid within bounding box
+                const bbox = turf.bbox(points);
+                const cellSize = 0.05;  // Finer grid for better resolution
+                const grid = turf.pointGrid(bbox, cellSize, { units: 'degrees' });
+
+                // Perform IDW interpolation
+                const options = {
+                    property: pollutant,
+                    gridType: 'point',
+                    weight: 2  // Adjust distance weighting
+                };
+                const surface = turf.interpolate(points, grid, options);
+
+                // Clip to boundary and simplify
+                const clipped = turf.intersect(surface, boundary);
+                return clipped ? turf.simplify(clipped, { tolerance: 0.001, highQuality: true }) : surface;
+            } catch (error) {
+                console.error('Interpolation error:', error);
+                return turf.featureCollection([]);
+            }
+        }
+
+        // Update visualization with proper layer management
+        function updateVisualization() {
+            const pollutant = document.getElementById('pollutantSelect').value;
+            
+            // Clear previous layers
+            if (currentOverlay) {
+                map.removeLayer(currentOverlay);
+                currentOverlay = null;
+            }
+
+            // Create and add new layers
+            try {
+                // Create interpolation surface
+                const interpolatedSurface = createInterpolation(pollutant);
+                currentOverlay = L.geoJSON(interpolatedSurface, {
+                    style(feature) {
+                        return {
+                            fillColor: getColor(feature.properties[pollutant], pollutant),
+                            fillOpacity: 0.6,
+                            weight: 0
+                        };
+                    }
+                }).addTo(map);
+
+                // Add sensor points with hover effects
+                L.geoJSON(turf.featureCollection(sensorPoints), {
+                    pointToLayer: (feature, latlng) => {
+                        const value = feature.properties[pollutant]?.v ?? 'N/A';
+                        return L.circleMarker(latlng, {
+                            radius: 8,
+                            fillColor: getColor(value, pollutant),
+                            color: '#333',
+                            weight: 1,
+                            opacity: 0.8,
+                            fillOpacity: 0.9
+                        }).bindTooltip(`${pollutant.toUpperCase()}: ${value}`, 
+                            { permanent: false, direction: 'top' });
+                    }
+                }).addTo(map);
+
+                // Update legend
+                addLegend(pollutant);
+            } catch (error) {
+                console.error('Visualization error:', error);
+            }
+        }
+
+        // Enhanced color mapping with proper breakpoints
+        function getColor(value, pollutant) {
+            const { colors, breaks } = colorScales[pollutant];
+            for (let i = 0; i < breaks.length; i++) {
+                if (value <= breaks[i]) return colors[i];
+            }
+            return colors[colors.length - 1];
+        }
+
+        // Dynamic legend with proper labeling
+        function addLegend(pollutant) {
+            const legend = L.control({ position: 'bottomright' });
+            legend.onAdd = () => {
+                const div = L.DomUtil.create('div', 'legend');
+                const { colors, breaks } = colorScales[pollutant];
+                
+                div.innerHTML = `<h4>${pollutant.toUpperCase()} (µg/m³)</h4>`;
+                for (let i = 0; i < colors.length; i++) {
+                    const lower = breaks[i];
+                    const upper = breaks[i + 1] ? breaks[i + 1] : '∞';
+                    div.innerHTML += `
+                        <div>
+                            <i style="background:${colors[i]}"></i>
+                            ${i === 0 ? '&lt; ' : ''}${lower}${upper !== '∞' ? `–${upper}` : '+'}
+                        </div>
+                    `;
+                }
+                return div;
+            };
+            legend.addTo(map);
+        }
+
+        // Initialize application
+        document.getElementById('pollutantSelect').addEventListener('change', updateVisualization);
+        fetchAllData().catch(error => console.error('Initialization error:', error));
+    </script>
+</body>
+</html>
